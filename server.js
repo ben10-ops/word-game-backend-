@@ -175,10 +175,36 @@ const QUIZ_ITEMS = [
   },
 ]
 
+function normalizeOrigin(origin) {
+  if (!origin) return ''
+  return origin.trim().replace(/\/$/, '').toLowerCase()
+}
+
+function matchWildcardOrigin(origin, pattern) {
+  try {
+    const originUrl = new URL(origin)
+    const patternUrl = new URL(pattern.replace('*.', ''))
+    const patternHost = patternUrl.hostname
+    return originUrl.protocol === patternUrl.protocol && originUrl.hostname.endsWith(`.${patternHost}`)
+  } catch {
+    return false
+  }
+}
+
 function isOriginAllowed(origin) {
   if (!origin) return true
   if (ALLOWED_ORIGINS.includes('*')) return true
-  return ALLOWED_ORIGINS.includes(origin)
+
+  const normalizedOrigin = normalizeOrigin(origin)
+
+  return ALLOWED_ORIGINS.some((allowed) => {
+    const normalizedAllowed = normalizeOrigin(allowed)
+    if (normalizedAllowed === normalizedOrigin) return true
+    if (normalizedAllowed.includes('*.') && normalizedAllowed.startsWith('http')) {
+      return matchWildcardOrigin(normalizedOrigin, normalizedAllowed)
+    }
+    return false
+  })
 }
 
 const corsOptions = {
