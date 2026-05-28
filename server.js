@@ -1141,12 +1141,13 @@ io.on('connection', (socket) => {
       player.correctHits += 1
       room.questionStats.correct += 1
       addFeed(`${player.name}: Correct answer +${delta}`)
+      room.words.splice(index, 1)
       rotateQuestion('answered')
     } else {
       player.wrongHits += 1
       room.questionStats.wrong += 1
       addFeed(`${player.name}: Wrong answer +0`)
-      rotateQuestion('answered')
+      room.words.splice(index, 1)
     }
 
     io.to(ROOM_ID).emit('state', serializeState())
