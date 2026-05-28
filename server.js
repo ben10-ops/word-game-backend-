@@ -1,37 +1,43 @@
+import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import { createServer } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { Server } from 'socket.io'
+import pg from 'pg'
+
+const { Pool } = pg
 
 const HOST = process.env.HOST || '0.0.0.0'
 const PORT = Number(process.env.PORT || 4000)
+const DATABASE_URL = process.env.DATABASE_URL || ''
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || '*')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean)
 const ROOM_ID = 'main'
-const GAME_SECONDS = 60
+const GAME_SECONDS = 120
 const QUESTION_DURATION_MS = 7000
 const WORLD_WIDTH = 1200
 const WORLD_HEIGHT = 760
+const MAX_PLAYERS = 20
 
 const PERFORMANCE_PROFILES = {
   standard: {
-    maxWords: 52,
-    spawnBase: 3.4,
-    spawnRamp: 6.2,
-    size: { correct: [20, 30], wrong: [15, 25] },
-    speed: { min: 36, max: 88, progressMult: 0.68 },
+    maxWords: 34,
+    spawnBase: 2.2,
+    spawnRamp: 4.1,
+    size: { correct: [24, 36], wrong: [19, 30] },
+    speed: { min: 30, max: 74, progressMult: 0.58 },
     life: { min: 15000, max: 24000, progressDrop: 3200 },
     drift: { min: 8, max: 24 },
   },
   smooth: {
-    maxWords: 36,
-    spawnBase: 2.8,
-    spawnRamp: 4.8,
-    size: { correct: [18, 26], wrong: [14, 22] },
-    speed: { min: 30, max: 72, progressMult: 0.58 },
+    maxWords: 26,
+    spawnBase: 1.8,
+    spawnRamp: 3.2,
+    size: { correct: [23, 34], wrong: [18, 28] },
+    speed: { min: 26, max: 60, progressMult: 0.5 },
     life: { min: 16500, max: 26000, progressDrop: 2600 },
     drift: { min: 6, max: 18 },
   },
@@ -62,59 +68,59 @@ const COLOR_VARIANT_COUNT = 8
 
 const QUIZ_ITEMS = [
   {
-    prompt: 'Where should employees go for quick links, announcements, and real-time company updates?',
+    prompt: 'Need company updates and quick links. Which app do you open?',
     answer: 'OneConnect',
   },
   {
-    prompt: 'Which app solves the challenge of Day-1 onboarding without chasing many teams?',
+    prompt: 'New joiner onboarding tasks are pending. Which app helps most?',
     answer: 'eMbark',
   },
   {
-    prompt: 'If laptop and mobile tracking visibility is missing, which app should be used?',
+    prompt: 'You need to check assigned devices and ownership. Which app is correct?',
     answer: 'MyAssets',
   },
   {
-    prompt: 'Which platform keeps contract renewals, approvals, and obligations from being missed?',
+    prompt: 'Contract renewals and approvals must be tracked. Which app should you use?',
     answer: 'ContractManagementSystem',
   },
   {
-    prompt: 'Which app enables seamless guest entry with minimal calls and paperwork?',
+    prompt: 'Guest entry and visitor logs are needed. Which app fits?',
     answer: 'VisitorManagementSystem',
   },
   {
-    prompt: 'Which app makes career growth a guided process instead of guesswork?',
+    prompt: 'Career growth and pathway planning should be guided. Which app supports this?',
     answer: 'CAF',
   },
   {
-    prompt: 'Where do teams manage planning, reporting, and governance in one flow?',
+    prompt: 'Leaders need planning and governance visibility. Which app is used?',
     answer: 'Pulse',
   },
   {
-    prompt: 'Which app turns delivery excellence into visible score-based tracking?',
+    prompt: 'Delivery maturity and execution scores are required. Which app provides this?',
     answer: 'Compass',
   },
   {
-    prompt: 'Which platform captures employee ideas that may otherwise never surface?',
+    prompt: 'Employees want to submit innovation ideas. Which app should be used?',
     answer: 'HouseOfIdeas',
   },
   {
-    prompt: 'An employee changes team and needs asset reassignment. Which app handles this?',
+    prompt: 'An employee changes team and needs device reassignment. Which app handles it?',
     answer: 'MyAssets',
   },
   {
-    prompt: 'A receptionist needs to manage daily visitor entry logs. Which app is correct?',
+    prompt: 'Reception needs daily visitor check-in records. Which app is correct?',
     answer: 'VisitorManagementSystem',
   },
   {
-    prompt: 'A manager needs to track contract ownership and accountability. Which app fits?',
+    prompt: 'Manager wants contract ownership and accountability tracking. Which app fits?',
     answer: 'ContractManagementSystem',
   },
   {
-    prompt: 'Leaders want action-oriented employee sentiment and governance insights. Which app should they use?',
+    prompt: 'Need governance and workforce insight dashboards. Which app should leaders use?',
     answer: 'Pulse',
   },
   {
-    prompt: 'Which app aligns execution with delivery goals and performance visibility?',
+    prompt: 'Execution must align with delivery goals and KPIs. Which app helps?',
     answer: 'Compass',
   },
   {
@@ -122,23 +128,23 @@ const QUIZ_ITEMS = [
     answer: 'eMbark',
   },
   {
-    prompt: 'Which app is the central place for enterprise communication and instant navigation?',
+    prompt: 'Which app is the central front door for enterprise communication?',
     answer: 'OneConnect',
   },
   {
-    prompt: 'Which application should an employee use to submit and track innovation ideas?',
+    prompt: 'Which app should employees use to submit and track ideas?',
     answer: 'HouseOfIdeas',
   },
   {
-    prompt: 'When contract lifecycle actions require approvals and reminders, which app is best?',
+    prompt: 'Approvals and reminders are needed for contracts. Which app is best?',
     answer: 'ContractManagementSystem',
   },
   {
-    prompt: 'If a facility needs a clean digital guest experience, which app supports that process?',
+    prompt: 'Facility team wants a digital guest experience. Which app supports it?',
     answer: 'VisitorManagementSystem',
   },
   {
-    prompt: 'Which platform helps employees discover structured opportunities for career progression?',
+    prompt: 'Which platform helps employees discover structured career opportunities?',
     answer: 'CAF',
   },
   {
@@ -195,7 +201,17 @@ function isOriginAllowed(origin) {
   if (!origin) return true
   if (ALLOWED_ORIGINS.includes('*')) return true
 
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+    return true
+  }
+
   const normalizedOrigin = normalizeOrigin(origin)
+
+  // Allow all localhost / 127.0.0.1 origins regardless of port
+  try {
+    const parsed = new URL(origin)
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return true
+  } catch { /* ignore invalid origin */ }
 
   return ALLOWED_ORIGINS.some((allowed) => {
     const normalizedAllowed = normalizeOrigin(allowed)
@@ -267,6 +283,285 @@ const QUESTION_OPTION_COUNT = 8
 const MIN_CORRECT_WORDS = 2
 const QUALIFICATION_RATIO = 0.6
 
+const dbPool = DATABASE_URL
+  ? new Pool({
+      connectionString: DATABASE_URL,
+      ssl: DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+    })
+  : null
+
+let DB_READY = false
+
+function getDatabaseName(connectionString) {
+  if (!connectionString) return ''
+  try {
+    const url = new URL(connectionString)
+    return url.pathname.replace(/^\//, '')
+  } catch {
+    return ''
+  }
+}
+
+const ACTIVE_DB_NAME = getDatabaseName(DATABASE_URL)
+
+function sanitizeStringArray(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 64)
+}
+
+function sanitizeText(value, maxLength = 2000) {
+  return String(value || '').trim().slice(0, maxLength)
+}
+
+function quoteIdentifier(identifier) {
+  return `"${String(identifier).replace(/"/g, '""')}"`
+}
+
+async function ensureLegacyFeedbackColumnDefaults() {
+  if (!dbPool) return
+
+  const requiredInsertColumns = new Set([
+    'room_id',
+    'session_id',
+    'player_name',
+    'score_entry_id',
+    'apps_used',
+    'aspects_well',
+    'aspects_well_other',
+    'improvements_needed',
+    'improvements_other',
+    'additional_suggestions',
+    'submitted_at',
+  ])
+
+  const schemaResult = await dbPool.query(
+    `
+      SELECT
+        column_name,
+        data_type,
+        udt_name,
+        is_nullable,
+        column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'survey_feedback'
+    `,
+  )
+
+  for (const column of schemaResult.rows) {
+    const name = String(column.column_name || '')
+    const isNotNull = String(column.is_nullable || '').toUpperCase() === 'NO'
+    const hasDefault = column.column_default != null
+
+    if (!name || !isNotNull || hasDefault || name === 'id' || requiredInsertColumns.has(name)) {
+      continue
+    }
+
+    const dataType = String(column.data_type || '').toLowerCase()
+    const udtName = String(column.udt_name || '')
+    const columnId = quoteIdentifier(name)
+
+    let defaultSql = `''`
+    if (dataType === 'boolean') {
+      defaultSql = 'FALSE'
+    } else if (
+      dataType.includes('int') ||
+      dataType.includes('numeric') ||
+      dataType.includes('real') ||
+      dataType.includes('double')
+    ) {
+      defaultSql = '0'
+    } else if (dataType.includes('timestamp') || dataType === 'date') {
+      defaultSql = 'NOW()'
+    } else if (udtName.startsWith('_')) {
+      defaultSql = `ARRAY[]::${udtName.slice(1)}[]`
+    }
+
+    await dbPool.query(
+      `ALTER TABLE survey_feedback ALTER COLUMN ${columnId} SET DEFAULT ${defaultSql}`,
+    )
+  }
+}
+
+async function initializeDatabase() {
+  if (!dbPool) {
+    console.warn('DATABASE_URL not configured. Feedback submissions will not persist.')
+    return
+  }
+
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS player_scores (
+      id BIGSERIAL PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      session_id TEXT NOT NULL DEFAULT 'session-legacy',
+      player_name TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      correct_hits INTEGER NOT NULL,
+      wrong_hits INTEGER NOT NULL,
+      attempted BOOLEAN NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (room_id, session_id, player_name)
+    )
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE player_scores
+    ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'session-legacy'
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE player_scores
+    DROP CONSTRAINT IF EXISTS player_scores_room_id_player_name_key
+  `)
+
+  await dbPool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS player_scores_room_session_player_uq
+    ON player_scores (room_id, session_id, player_name)
+  `)
+
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS survey_feedback (
+      id BIGSERIAL PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      player_name TEXT NOT NULL,
+      score_entry_id BIGINT REFERENCES player_scores(id),
+      apps_used TEXT[] NOT NULL,
+      aspects_well TEXT[] NOT NULL,
+      aspects_well_other TEXT,
+      improvements_needed TEXT[] NOT NULL,
+      improvements_other TEXT,
+      additional_suggestions TEXT,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS room_id TEXT
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS session_id TEXT
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS player_name TEXT
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS score_entry_id BIGINT REFERENCES player_scores(id)
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS apps_used TEXT[]
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS aspects_well TEXT[]
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS aspects_well_other TEXT
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS improvements_needed TEXT[]
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS improvements_other TEXT
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS additional_suggestions TEXT
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN submitted_at SET DEFAULT NOW()
+  `)
+
+  await dbPool.query(`
+    UPDATE survey_feedback SET submitted_at = NOW() WHERE submitted_at IS NULL
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN submitted_at SET NOT NULL
+  `)
+
+  await dbPool.query(
+    `UPDATE survey_feedback SET room_id = COALESCE(room_id, $1) WHERE room_id IS NULL`,
+    [ROOM_ID],
+  )
+  await dbPool.query(
+    `UPDATE survey_feedback SET session_id = COALESCE(session_id, $1) WHERE session_id IS NULL`,
+    ['session-legacy'],
+  )
+  await dbPool.query(`UPDATE survey_feedback SET player_name = COALESCE(player_name, 'Unknown') WHERE player_name IS NULL`)
+  await dbPool.query(`UPDATE survey_feedback SET apps_used = COALESCE(apps_used, ARRAY[]::text[]) WHERE apps_used IS NULL`)
+  await dbPool.query(
+    `UPDATE survey_feedback SET aspects_well = COALESCE(aspects_well, ARRAY[]::text[]) WHERE aspects_well IS NULL`,
+  )
+  await dbPool.query(
+    `UPDATE survey_feedback SET improvements_needed = COALESCE(improvements_needed, ARRAY[]::text[]) WHERE improvements_needed IS NULL`,
+  )
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN room_id SET NOT NULL
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN session_id SET NOT NULL
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN player_name SET NOT NULL
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN apps_used SET NOT NULL
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN aspects_well SET NOT NULL
+  `)
+
+  await dbPool.query(`
+    ALTER TABLE survey_feedback
+    ALTER COLUMN improvements_needed SET NOT NULL
+  `)
+
+  await ensureLegacyFeedbackColumnDefaults()
+
+  DB_READY = true
+  console.log('PostgreSQL feedback storage initialized')
+}
+
 function sampleN(items, n) {
   const pool = [...items]
   const out = []
@@ -302,12 +597,35 @@ function createQuestionRound(previousId = null) {
   }
 }
 
+function createSessionId() {
+  return `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function computeTopFive(players) {
+  return [...players]
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score
+      if (right.correctHits !== left.correctHits) return right.correctHits - left.correctHits
+      if (left.wrongHits !== right.wrongHits) return left.wrongHits - right.wrongHits
+      return left.name.localeCompare(right.name)
+    })
+    .slice(0, 5)
+    .map((player) => ({
+      id: player.id,
+      name: player.name,
+      color: player.color,
+      score: player.score,
+      attempted: player.correctHits + player.wrongHits > 0,
+    }))
+}
+
 const room = createRoomState()
 
 function createRoomState() {
   const currentQuestion = createQuestionRound()
   return {
     id: ROOM_ID,
+    sessionId: createSessionId(),
     performanceMode: 'smooth',
     startedAtMs: Date.now(),
     running: true,
@@ -324,7 +642,12 @@ function createRoomState() {
     touchedWords: new Set(),
     questionStats: { correct: 0, wrong: 0 },
     questionsAppeared: 1,
+    sessionTopFive: [],
   }
+}
+
+function updateSessionTopFive() {
+  room.sessionTopFive = computeTopFive(room.players)
 }
 
 function requiredCorrectHits() {
@@ -534,12 +857,14 @@ function triggerEvent(nowMs) {
   if (event.id === 'data-breach' && room.players.length > 1) {
     const sorted = [...room.players].sort((a, b) => b.score - a.score)
     const leader = sorted[0]
+    if (leader.score <= 0) return
     const candidates = room.players.filter((player) => player.id !== leader.id)
     const receiver = pick(candidates)
-    const transfer = Math.max(4, Math.floor(Math.abs(leader.score) * 0.15))
-    leader.score -= transfer
-    receiver.score += transfer
-    addFeed(`Incident Spillover: ${transfer} points moved from ${leader.name}`)
+    const transfer = Math.max(1, Math.floor(Math.abs(leader.score) * 0.15))
+    const safeTransfer = Math.min(leader.score, transfer)
+    leader.score -= safeTransfer
+    receiver.score += safeTransfer
+    addFeed(`Incident Spillover: ${safeTransfer} points moved from ${leader.name}`)
   }
 }
 
@@ -554,8 +879,10 @@ function clearEvent() {
 
 function serializeState() {
   const requiredCorrect = requiredCorrectHits()
+  updateSessionTopFive()
   return {
     roomId: room.id,
+    sessionId: room.sessionId,
     performanceMode: room.performanceMode,
     running: room.running,
     timeLeft: room.timeLeft,
@@ -568,15 +895,19 @@ function serializeState() {
       ...player,
       isOnline: Boolean(socketId),
       isQualified: (player.correctHits || 0) >= requiredCorrect,
+      attempted: (player.correctHits || 0) + (player.wrongHits || 0) > 0,
     })),
     feed: room.feed,
     event: room.event,
     world: { width: WORLD_WIDTH, height: WORLD_HEIGHT },
     questionStats: room.questionStats,
+    sessionTopFive: room.sessionTopFive,
+    maxPlayers: MAX_PLAYERS,
   }
 }
 
 function resetGame() {
+  room.sessionId = createSessionId()
   room.startedAtMs = Date.now()
   room.running = true
   room.timeLeft = GAME_SECONDS
@@ -591,6 +922,7 @@ function resetGame() {
   room.touchedWords.clear()
   room.questionStats = { correct: 0, wrong: 0 }
   room.questionsAppeared = 1
+  room.sessionTopFive = []
   room.players = room.players.map((player) => ({
     ...player,
     score: 0,
@@ -617,6 +949,7 @@ function gameTick() {
 
   if (room.timeLeft <= 0) {
     room.running = false
+    updateSessionTopFive()
     addFeed('Timer complete. Match ended.')
     return
   }
@@ -628,10 +961,6 @@ function gameTick() {
 
   if (room.event.id && nowMs >= room.event.endsAtMs) {
     clearEvent()
-  }
-
-  if (nowMs >= room.nextQuestionAtMs) {
-    rotateQuestion('timeout')
   }
 
   const spawnRate = profile.spawnBase + progress * profile.spawnRamp
@@ -685,6 +1014,28 @@ function playerFromSocket(socketId) {
   return room.players.find((player) => player.socketId === socketId)
 }
 
+function findPlayerByIdentity(playerId, playerName, sessionId) {
+  const normalizedName = String(playerName || '').trim().toLowerCase()
+  const normalizedSessionId = sanitizeText(sessionId, 64)
+
+  if (normalizedSessionId) {
+    const bySession = room.players.find((player) => player.sessionId === normalizedSessionId)
+    if (bySession) return bySession
+  }
+
+  if (playerId) {
+    const byId = room.players.find((player) => player.id === playerId)
+    if (byId) return byId
+  }
+
+  if (normalizedName) {
+    const byName = room.players.find((player) => player.name.toLowerCase() === normalizedName)
+    if (byName) return byName
+  }
+
+  return null
+}
+
 io.on('connection', (socket) => {
   socket.join(ROOM_ID)
   socket.emit('state', serializeState())
@@ -705,28 +1056,39 @@ io.on('connection', (socket) => {
     addFeed(`Performance mode switched to ${nextMode}`)
   })
 
-  socket.on('player:join', ({ name }) => {
+  socket.on('player:join', ({ name, sessionId }) => {
     const cleaned = String(name || '').trim().slice(0, 24)
+    const cleanedSessionId = sanitizeText(sessionId, 64) || `client-${socket.id}`
     if (!cleaned) {
       socket.emit('player:join:error', { message: 'Name is required' })
       return
     }
 
-    if (!room.running) {
-      resetGame()
-      addFeed('Round restarted after new player joined')
+    let existing = room.players.find((player) => player.sessionId === cleanedSessionId)
+    if (!existing) {
+      existing = room.players.find((player) => player.name.toLowerCase() === cleaned.toLowerCase())
     }
 
-    const existing = room.players.find((player) => player.name.toLowerCase() === cleaned.toLowerCase())
     if (existing) {
       existing.socketId = socket.id
-      socket.emit('player:joined', { playerId: existing.id, name: existing.name })
+      existing.sessionId = cleanedSessionId
+      socket.emit('player:joined', {
+        playerId: existing.id,
+        name: existing.name,
+        sessionId: existing.sessionId,
+      })
       addFeed(`${existing.name} reconnected`)
+      return
+    }
+
+    if (room.players.length >= MAX_PLAYERS) {
+      socket.emit('player:join:error', { message: 'Room is full (20 players max).' })
       return
     }
 
     const player = {
       id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      sessionId: cleanedSessionId,
       socketId: socket.id,
       name: cleaned,
       score: 0,
@@ -737,7 +1099,11 @@ io.on('connection', (socket) => {
     }
 
     room.players.push(player)
-    socket.emit('player:joined', { playerId: player.id, name: player.name })
+    socket.emit('player:joined', {
+      playerId: player.id,
+      name: player.name,
+      sessionId: player.sessionId,
+    })
     addFeed(`${player.name} joined the round`)
   })
 
@@ -756,8 +1122,8 @@ io.on('connection', (socket) => {
 
     const word = room.words[index]
 
-    const delta = word.isCorrect ? 14 : -7
-    player.score += delta
+    const delta = word.isCorrect ? 14 : 0
+    player.score = Math.max(0, player.score + delta)
 
     if (word.isCorrect) {
       player.correctHits += 1
@@ -767,19 +1133,173 @@ io.on('connection', (socket) => {
     } else {
       player.wrongHits += 1
       room.questionStats.wrong += 1
-      addFeed(`${player.name}: Wrong answer ${delta}`)
+      addFeed(`${player.name}: Wrong answer +0`)
       rotateQuestion('answered')
     }
 
     io.to(ROOM_ID).emit('state', serializeState())
   })
 
-  socket.on('player:survey-submitted', () => {
-    const player = playerFromSocket(socket.id)
-    if (!player || player.surveySubmitted) return
+  socket.on('player:survey-submitted', async (payload = {}, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {}
+
+    console.log(
+      '[survey] submit event',
+      JSON.stringify({
+        socketId: socket.id,
+        payloadPlayerId: payload?.playerId || '',
+        payloadPlayerName: payload?.playerName || '',
+        payloadSessionId: payload?.playerSessionId || '',
+      }),
+    )
+
+    let player = playerFromSocket(socket.id)
+    if (!player) {
+      player = findPlayerByIdentity(payload?.playerId, payload?.playerName, payload?.playerSessionId)
+      if (player) {
+        player.socketId = socket.id
+        console.log(`[survey] restored player socket mapping for ${player.name}`)
+      }
+    }
+
+    if (!player) {
+      console.warn('[survey] player session not found for submission')
+      ack({ ok: false, message: 'Player session not found' })
+      return
+    }
+
+    if (player.surveySubmitted) {
+      ack({ ok: true })
+      return
+    }
+
+    if (!dbPool || !DB_READY) {
+      ack({ ok: false, message: 'Feedback storage is not configured. Please try later.' })
+      return
+    }
+
+    const appsUsed = sanitizeStringArray(payload.appsUsed)
+    const aspectsWell = sanitizeStringArray(payload.aspectsWell)
+    const improvementsNeeded = sanitizeStringArray(payload.improvementsNeeded)
+    const aspectsWellOther = sanitizeText(payload.aspectsWellOther, 400)
+    const improvementsOther = sanitizeText(payload.improvementsOther, 400)
+    const additionalSuggestions = sanitizeText(payload.additionalSuggestions, 4000)
+
+    const normalizedAspectsWell = [...aspectsWell]
+    if (normalizedAspectsWell.length === 0 && aspectsWellOther) {
+      normalizedAspectsWell.push(`Other: ${aspectsWellOther}`)
+    }
+
+    const normalizedImprovementsNeeded = [...improvementsNeeded]
+    if (normalizedImprovementsNeeded.length === 0 && improvementsOther) {
+      normalizedImprovementsNeeded.push(`Other: ${improvementsOther}`)
+    }
+
+    console.log(
+      '[survey] received',
+      JSON.stringify({
+        roomId: room.id,
+        playerName: player.name,
+        appsUsedCount: appsUsed.length,
+        aspectsWellCount: normalizedAspectsWell.length,
+        improvementsNeededCount: normalizedImprovementsNeeded.length,
+      }),
+    )
+
+    if (
+      appsUsed.length === 0 ||
+      normalizedAspectsWell.length === 0 ||
+      normalizedImprovementsNeeded.length === 0
+    ) {
+      console.warn(`[survey] validation failed for ${player.name}`)
+      ack({ ok: false, message: 'Please complete all required survey sections.' })
+      return
+    }
+
+    try {
+      const scoreResult = await dbPool.query(
+        `
+          INSERT INTO player_scores (
+            room_id,
+            session_id,
+            player_name,
+            score,
+            correct_hits,
+            wrong_hits,
+            attempted,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+          ON CONFLICT (room_id, session_id, player_name)
+          DO UPDATE SET
+            score = EXCLUDED.score,
+            correct_hits = EXCLUDED.correct_hits,
+            wrong_hits = EXCLUDED.wrong_hits,
+            attempted = EXCLUDED.attempted,
+            updated_at = NOW()
+          RETURNING id
+        `,
+        [
+          room.id,
+          room.sessionId,
+          player.name,
+          player.score,
+          player.correctHits,
+          player.wrongHits,
+          player.correctHits + player.wrongHits > 0,
+        ],
+      )
+
+      const scoreEntryId = scoreResult.rows[0]?.id || null
+
+      console.log(
+        `[survey] score upserted for ${player.name} (scoreEntryId=${scoreEntryId ?? 'null'})`,
+      )
+
+      await dbPool.query(
+        `
+          INSERT INTO survey_feedback (
+            room_id,
+            session_id,
+            player_name,
+            score_entry_id,
+            apps_used,
+            aspects_well,
+            aspects_well_other,
+            improvements_needed,
+            improvements_other,
+            additional_suggestions,
+            submitted_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5::text[], $6::text[], $7, $8::text[], $9, $10, NOW()
+          )
+        `,
+        [
+          room.id,
+          room.sessionId,
+          player.name,
+          scoreEntryId,
+          appsUsed,
+          normalizedAspectsWell,
+          aspectsWellOther,
+          normalizedImprovementsNeeded,
+          improvementsOther,
+          additionalSuggestions,
+        ],
+      )
+
+      console.log(`[survey] feedback inserted for ${player.name}`)
+    } catch (error) {
+      console.error('Failed to save feedback submission', error)
+      ack({ ok: false, message: 'Unable to save feedback. Please try again.' })
+      return
+    }
+
     player.surveySubmitted = true
     addFeed(`${player.name} submitted survey feedback`)
     io.to(ROOM_ID).emit('state', serializeState())
+    ack({ ok: true })
   })
 
   socket.on('disconnect', () => {
@@ -794,10 +1314,16 @@ io.on('connection', (socket) => {
 setInterval(() => {
   gameTick()
   io.to(ROOM_ID).emit('state', serializeState())
-}, 33)
+}, 50)
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, room: ROOM_ID, players: room.players.length })
+  res.json({
+    ok: true,
+    room: ROOM_ID,
+    players: room.players.length,
+    dbReady: DB_READY,
+    database: ACTIVE_DB_NAME,
+  })
 })
 
 app.get('/', (_req, res) => {
@@ -806,8 +1332,12 @@ app.get('/', (_req, res) => {
     service: 'word-battle-backend',
     room: ROOM_ID,
     allowedOrigins: ALLOWED_ORIGINS,
+    dbReady: DB_READY,
+    database: ACTIVE_DB_NAME,
   })
 })
+
+await initializeDatabase()
 
 httpServer.listen(PORT, HOST, () => {
   const interfaces = networkInterfaces()
