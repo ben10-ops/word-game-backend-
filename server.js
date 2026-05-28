@@ -1075,6 +1075,10 @@ io.on('connection', (socket) => {
     if (existing) {
       existing.socketId = socket.id
       existing.sessionId = cleanedSessionId
+      if (!room.running) {
+        resetGame()
+        addFeed(`${existing.name} rejoined — new round started`)
+      }
       socket.emit('player:joined', {
         playerId: existing.id,
         name: existing.name,
@@ -1082,6 +1086,11 @@ io.on('connection', (socket) => {
       })
       addFeed(`${existing.name} reconnected`)
       return
+    }
+
+    if (!room.running) {
+      resetGame()
+      addFeed('New round started for incoming player')
     }
 
     if (room.players.length >= MAX_PLAYERS) {
