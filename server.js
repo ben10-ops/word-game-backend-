@@ -287,6 +287,9 @@ const dbPool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
       ssl: DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+      connectionTimeoutMillis: 8000,
+      idleTimeoutMillis: 30000,
+      max: 10,
     })
   : null
 
@@ -1337,7 +1340,12 @@ app.get('/', (_req, res) => {
   })
 })
 
-await initializeDatabase()
+try {
+  await initializeDatabase()
+} catch (err) {
+  console.error('DB initialization failed — server will start without database support:', err.message || err)
+  DB_READY = false
+}
 
 httpServer.listen(PORT, HOST, () => {
   const interfaces = networkInterfaces()
