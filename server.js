@@ -909,7 +909,7 @@ function serializeState() {
       options: room.currentQuestion.options,
     },
     words: room.words,
-    players: room.players.map(({ socketId, ...player }) => ({
+    players: room.players.map(({ socketId, tappedWordIds, ...player }) => ({
       ...player,
       isOnline: Boolean(socketId),
       isQualified: (player.correctHits || 0) >= requiredCorrect,
@@ -946,14 +946,15 @@ function resetGame() {
   room.questionsAppeared = 1
   room.sessionQuestionsCount = 0    // reset question counter for new round
   room.sessionTopFive = []
-  room.players = room.players.map((player) => ({
-    ...player,
-    score: 0,
-    correctHits: 0,
-    wrongHits: 0,
-    surveySubmitted: false,
-    autoFinished: false,
-  }))
+  room.players.forEach((player) => {
+    player.score = 0
+    player.correctHits = 0
+    player.wrongHits = 0
+    player.surveySubmitted = false
+    player.autoFinished = false
+    player.currentQuestion = createQuestionRound()
+    player.tappedWordIds = new Set()
+  })
   // Immediately push full state so all clients see 1:30 right away
   io.to(ROOM_ID).emit('state', serializeState())
 }
@@ -1111,6 +1112,9 @@ io.on('connection', (socket) => {
       existing.correctHits = 0
       existing.wrongHits = 0
       existing.surveySubmitted = false
+      existing.autoFinished = false
+      existing.currentQuestion = createQuestionRound()
+      existing.tappedWordIds = new Set()
       if (!room.running) {
         resetGame()
         addFeed(`${existing.name} rejoined — new round started`)
@@ -1147,7 +1151,10 @@ io.on('connection', (socket) => {
       correctHits: 0,
       wrongHits: 0,
       surveySubmitted: false,
+      autoFinished: false,
       color: PLAYER_COLORS[room.players.length % PLAYER_COLORS.length],
+      currentQuestion: createQuestionRound(),
+      tappedWordIds: new Set(),
     }
 
     room.players.push(player)
@@ -1161,32 +1168,39 @@ io.on('connection', (socket) => {
 
   socket.on('word:tap', ({ wordId }) => {
     if (!room.running) return
-    if (!wordId || room.touchedWords.has(wordId)) return
+    if (!wordId) return
 
     const player = playerFromSocket(socket.id)
     if (!player) return
+    if (player.autoFinished) return
 
-    const index = room.words.findIndex((word) => word.id === wordId)
-    if (index === -1) return
+    // Per-player dedup: ignore if this player already tapped this word
+    if (!player.tappedWordIds) player.tappedWordIds = new Set()
+    if (player.tappedWordIds.has(wordId)) return
 
-    room.touchedWords.add(wordId)
-    setTimeout(() => room.touchedWords.delete(wordId), 120)
+    const word = room.words.find((w) => w.id === wordId)
+    if (!word) return
 
-    const word = room.words[index]
+    player.tappedWordIds.add(wordId)
 
-    const delta = word.isCorrect ? 5 : 0
+    // Per-player correctness: check against THIS player's own question
+    const isCorrect = word.text === player.currentQuestion?.answer
+    const delta = isCorrect ? 5 : 0
     player.score = Math.max(0, player.score + delta)
 
-    if (word.isCorrect) {
+    if (isCorrect) {
       player.correctHits += 1
       room.questionStats.correct += 1
-      addFeed(`${player.name}: Correct answer +${delta}`)
+      addFeed(`${player.name}: Correct +${delta}`)
     } else {
       player.wrongHits += 1
       room.questionStats.wrong += 1
-      addFeed(`${player.name}: Wrong answer +0`)
+      addFeed(`${player.name}: Wrong +0`)
     }
-    room.words.splice(index, 1)
+
+    // Rotate THIS player's question individually
+    player.currentQuestion = createQuestionRound(player.currentQuestion?.id)
+    player.tappedWordIds = new Set()  // fresh slate for new question
 
     // Auto-finish when player has answered MAX_SESSION_QUESTIONS total (right or wrong)
     const totalAnswered = player.correctHits + player.wrongHits
@@ -1199,7 +1213,6 @@ io.on('connection', (socket) => {
       })
       addFeed(`${player.name} completed all ${MAX_SESSION_QUESTIONS} questions!`)
     }
-    // Question rotates on timer only — never on individual player taps
 
     io.to(ROOM_ID).emit('state', serializeState())
   })
