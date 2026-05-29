@@ -1198,9 +1198,8 @@ io.on('connection', (socket) => {
         qualifiesForGoodies: player.score >= GOODIES_BENCHMARK,
       })
       addFeed(`${player.name} completed all ${MAX_SESSION_QUESTIONS} questions!`)
-    } else {
-      rotateQuestion('answered')
     }
+    // Question rotates on timer only — never on individual player taps
 
     io.to(ROOM_ID).emit('state', serializeState())
   })
