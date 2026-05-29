@@ -742,19 +742,6 @@ function triggerEvent(nowMs) {
       }
     }
   }
-
-  if (event.id === 'data-breach' && room.players.length > 1) {
-    const sorted = [...room.players].sort((a, b) => b.score - a.score)
-    const leader = sorted[0]
-    if (leader.score <= 0) return
-    const candidates = room.players.filter((player) => player.id !== leader.id)
-    const receiver = pick(candidates)
-    const transfer = Math.max(1, Math.floor(Math.abs(leader.score) * 0.15))
-    const safeTransfer = Math.min(leader.score, transfer)
-    leader.score -= safeTransfer
-    receiver.score += safeTransfer
-    addFeed(`Incident Spillover: ${safeTransfer} points moved from ${leader.name}`)
-  }
 }
 
 function clearEvent() {
