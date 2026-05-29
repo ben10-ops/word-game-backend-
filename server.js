@@ -16,7 +16,10 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL
   .map((origin) => origin.trim())
   .filter(Boolean)
 const ROOM_ID = 'main'
-const GAME_SECONDS = 120
+const GAME_SECONDS = 90
+const MAX_SESSION_QUESTIONS = 15
+const GOODIES_BENCHMARK = 50
+const SESSION_DURATION_MS = 20 * 60 * 1000   // 20 minutes per event session
 const QUESTION_DURATION_MS = 7000
 const WORLD_WIDTH = 1200
 const WORLD_HEIGHT = 760
@@ -604,6 +607,7 @@ function createSessionId() {
 
 function computeTopFive(players) {
   return [...players]
+    .filter((player) => player.correctHits > 0 || player.score > 0)
     .sort((left, right) => {
       if (right.score !== left.score) return right.score - left.score
       if (right.correctHits !== left.correctHits) return right.correctHits - left.correctHits
@@ -628,6 +632,8 @@ function createRoomState() {
     id: ROOM_ID,
     sessionId: createSessionId(),
     performanceMode: 'smooth',
+    sessionStartedAtMs: Date.now(),   // never resets — tracks 20-min event window
+    sessionQuestionsCount: 0,         // counts questions shown this session (max 15)
     startedAtMs: Date.now(),
     running: true,
     timeLeft: GAME_SECONDS,
@@ -825,6 +831,18 @@ function rotateQuestion(reason = 'timeout') {
   const nowMs = Date.now()
   const progress = clamp((nowMs - room.startedAtMs) / (GAME_SECONDS * 1000), 0, 1)
   const profile = activeProfile()
+
+  room.sessionQuestionsCount += 1
+
+  // End session after 15 questions
+  if (room.sessionQuestionsCount >= MAX_SESSION_QUESTIONS) {
+    room.running = false
+    updateSessionTopFive()
+    addFeed('All 15 questions completed! Session ended.')
+    io.to(ROOM_ID).emit('state', serializeState())
+    return
+  }
+
   room.currentQuestion = createQuestionRound(room.currentQuestion.id)
   room.questionsAppeared += 1
   room.touchedWords.clear()
@@ -878,6 +896,8 @@ function clearEvent() {
 function serializeState() {
   const requiredCorrect = requiredCorrectHits()
   updateSessionTopFive()
+  const sessionElapsed = Date.now() - room.sessionStartedAtMs
+  const sessionTimeLeft = Math.max(0, Math.floor((SESSION_DURATION_MS - sessionElapsed) / 1000))
   return {
     roomId: room.id,
     sessionId: room.sessionId,
@@ -901,6 +921,10 @@ function serializeState() {
     questionStats: room.questionStats,
     sessionTopFive: room.sessionTopFive,
     maxPlayers: MAX_PLAYERS,
+    goodiesBenchmark: GOODIES_BENCHMARK,
+    sessionQuestionsTotal: MAX_SESSION_QUESTIONS,
+    sessionQuestionsCount: room.sessionQuestionsCount,
+    sessionTimeLeft,
   }
 }
 
@@ -911,7 +935,7 @@ function resetGame() {
   room.timeLeft = GAME_SECONDS
   room.currentQuestion = createQuestionRound()
   room.words = primeWordsForQuestion(room.currentQuestion, room.performanceMode, 0)
-  room.feed = ['Live multiplayer simulation restarted']
+  room.feed = ['New round started']
   room.event = { id: null, name: '', endsAtMs: 0 }
   room.nextEventAtMs = Date.now() + 9000
   room.nextQuestionAtMs = Date.now() + QUESTION_DURATION_MS
@@ -920,6 +944,7 @@ function resetGame() {
   room.touchedWords.clear()
   room.questionStats = { correct: 0, wrong: 0 }
   room.questionsAppeared = 1
+  room.sessionQuestionsCount = 0    // reset question counter for new round
   room.sessionTopFive = []
   room.players = room.players.map((player) => ({
     ...player,
@@ -927,8 +952,9 @@ function resetGame() {
     correctHits: 0,
     wrongHits: 0,
     surveySubmitted: false,
+    autoFinished: false,
   }))
-  // Immediately push full state so all clients see 2:00 right away
+  // Immediately push full state so all clients see 1:30 right away
   io.to(ROOM_ID).emit('state', serializeState())
 }
 
@@ -1064,6 +1090,14 @@ io.on('connection', (socket) => {
       return
     }
 
+    // Block joins if the 20-min event session is ending in < 30 seconds
+    const sessionElapsed = Date.now() - room.sessionStartedAtMs
+    const sessionRemaining = SESSION_DURATION_MS - sessionElapsed
+    if (sessionRemaining < 30000) {
+      socket.emit('player:join:error', { message: 'Session is ending. Please join the next one!' })
+      return
+    }
+
     let existing = room.players.find((player) => player.sessionId === cleanedSessionId)
     if (!existing) {
       existing = room.players.find((player) => player.name.toLowerCase() === cleaned.toLowerCase())
@@ -1072,6 +1106,11 @@ io.on('connection', (socket) => {
     if (existing) {
       existing.socketId = socket.id
       existing.sessionId = cleanedSessionId
+      // Reset their score so a refresh can't preserve previous answers
+      existing.score = 0
+      existing.correctHits = 0
+      existing.wrongHits = 0
+      existing.surveySubmitted = false
       if (!room.running) {
         resetGame()
         addFeed(`${existing.name} rejoined — new round started`)
@@ -1088,6 +1127,10 @@ io.on('connection', (socket) => {
     if (!room.running) {
       resetGame()
       addFeed('New round started for incoming player')
+    } else {
+      // Always reset to full 2:00 when a new player joins so everyone starts fresh
+      resetGame()
+      addFeed(`${cleaned} joined — timer reset to ${GAME_SECONDS}s`)
     }
 
     if (room.players.length >= MAX_PLAYERS) {
@@ -1131,20 +1174,32 @@ io.on('connection', (socket) => {
 
     const word = room.words[index]
 
-    const delta = word.isCorrect ? 14 : 0
+    const delta = word.isCorrect ? 5 : 0
     player.score = Math.max(0, player.score + delta)
 
     if (word.isCorrect) {
       player.correctHits += 1
       room.questionStats.correct += 1
       addFeed(`${player.name}: Correct answer +${delta}`)
-      room.words.splice(index, 1)
-      rotateQuestion('answered')
     } else {
       player.wrongHits += 1
       room.questionStats.wrong += 1
       addFeed(`${player.name}: Wrong answer +0`)
-      room.words.splice(index, 1)
+    }
+    room.words.splice(index, 1)
+
+    // Auto-finish when player has answered MAX_SESSION_QUESTIONS total (right or wrong)
+    const totalAnswered = player.correctHits + player.wrongHits
+    if (totalAnswered >= MAX_SESSION_QUESTIONS) {
+      player.autoFinished = true
+      socket.emit('player:auto-finish', {
+        score: player.score,
+        correctHits: player.correctHits,
+        qualifiesForGoodies: player.score >= GOODIES_BENCHMARK,
+      })
+      addFeed(`${player.name} completed all ${MAX_SESSION_QUESTIONS} questions!`)
+    } else {
+      rotateQuestion('answered')
     }
 
     io.to(ROOM_ID).emit('state', serializeState())
