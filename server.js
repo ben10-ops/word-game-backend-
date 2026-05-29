@@ -624,41 +624,33 @@ function computeTopFive(players) {
     }))
 }
 
-const room = createRoomState()
+// Track sockets that haven't joined as a player yet (host view)
+const hostSockets = new Set()
 
 function createRoomState() {
-  const currentQuestion = createQuestionRound()
   return {
     id: ROOM_ID,
     sessionId: createSessionId(),
     performanceMode: 'smooth',
-    sessionStartedAtMs: Date.now(),   // never resets — tracks 20-min event window
-    sessionQuestionsCount: 0,         // counts questions shown this session (max 15)
-    startedAtMs: Date.now(),
+    sessionStartedAtMs: Date.now(),
+    sessionQuestionsCount: 0,
     running: true,
-    timeLeft: GAME_SECONDS,
-    currentQuestion,
-    words: primeWordsForQuestion(currentQuestion, 'smooth', 0),
     players: [],
-    feed: ['Live multiplayer simulation started'],
+    feed: ['Session started'],
     event: { id: null, name: '', endsAtMs: 0 },
     nextEventAtMs: Date.now() + 9000,
-    nextQuestionAtMs: Date.now() + QUESTION_DURATION_MS,
-    spawnBudget: 0,
     lastTickMs: Date.now(),
-    touchedWords: new Set(),
     questionStats: { correct: 0, wrong: 0 },
-    questionsAppeared: 1,
     sessionTopFive: [],
   }
 }
 
+const room = createRoomState()
+
+
+
 function updateSessionTopFive() {
   room.sessionTopFive = computeTopFive(room.players)
-}
-
-function requiredCorrectHits() {
-  return Math.max(1, Math.ceil(room.questionsAppeared * QUALIFICATION_RATIO))
 }
 
 function addFeed(message) {
@@ -737,127 +729,6 @@ function primeWordsForQuestion(question, mode = 'smooth', progress = 0) {
   return shuffle([...appWords, ...confusionWords])
 }
 
-function retargetWordsForQuestion(question, profile, progress) {
-  if (room.words.length === 0) {
-    room.words = primeWordsForQuestion(question, room.performanceMode, progress)
-    return
-  }
-
-  const totalWords = room.words.length
-  const desiredCorrect = Math.min(MIN_CORRECT_WORDS, totalWords)
-  const correctSlots = new Set()
-
-  while (correctSlots.size < desiredCorrect) {
-    correctSlots.add(randInt(0, totalWords - 1))
-  }
-
-  const decoyPool = shuffle(question.options.filter((option) => option !== question.answer))
-  const correctColorPool = shuffle(Array.from({ length: COLOR_VARIANT_COUNT }, (_, index) => index + 1))
-  let decoyIndex = 0
-  let correctColorIndex = 0
-
-  room.words = room.words.map((word, index) => {
-    const isCorrect = correctSlots.has(index)
-    const text = isCorrect
-      ? question.answer
-      : decoyPool.length > 0
-        ? decoyPool[decoyIndex++ % decoyPool.length]
-        : pick(question.options)
-
-    const size = isCorrect
-      ? rand(profile.size.correct[0], profile.size.correct[1])
-      : rand(profile.size.wrong[0], profile.size.wrong[1])
-
-    return {
-      ...word,
-      text,
-      type: isCorrect ? 'target' : 'decoy',
-      tier: isCorrect ? 'high' : 'mid',
-      isCorrect,
-      size,
-      halfW: Math.max(52, text.length * size * 0.27),
-      halfH: Math.max(18, size * 0.74),
-      colorVariant: isCorrect
-        ? correctColorPool[correctColorIndex++ % correctColorPool.length]
-        : randInt(1, COLOR_VARIANT_COUNT),
-      ageMs: 0,
-      lifeMs: rand(profile.life.min, profile.life.max) - progress * profile.life.progressDrop,
-    }
-  })
-}
-
-function countCorrectOptionWords() {
-  return room.words.reduce((count, word) => (word.isCorrect ? count + 1 : count), 0)
-}
-
-function ensureCorrectOptionWords(progress, profile) {
-  let correctWords = countCorrectOptionWords()
-
-  while (correctWords < MIN_CORRECT_WORDS) {
-    const usedCorrectColors = new Set(
-      room.words.filter((word) => word.isCorrect).map((word) => word.colorVariant),
-    )
-    const nextCorrectColor = randomColorVariant(usedCorrectColors)
-
-    if (room.words.length < profile.maxWords) {
-      room.words.push(
-        createOptionWord(
-          progress,
-          profile,
-          room.currentQuestion,
-          room.currentQuestion.answer,
-          nextCorrectColor,
-        ),
-      )
-      correctWords += 1
-      continue
-    }
-
-    const replaceIndex = room.words.findIndex((word) => !word.isCorrect)
-    if (replaceIndex === -1) break
-
-    room.words[replaceIndex] = createOptionWord(
-      progress,
-      profile,
-      room.currentQuestion,
-      room.currentQuestion.answer,
-      nextCorrectColor,
-    )
-    correctWords += 1
-  }
-}
-
-function rotateQuestion(reason = 'timeout') {
-  const nowMs = Date.now()
-  const progress = clamp((nowMs - room.startedAtMs) / (GAME_SECONDS * 1000), 0, 1)
-  const profile = activeProfile()
-
-  room.sessionQuestionsCount += 1
-
-  // End session after 15 questions
-  if (room.sessionQuestionsCount >= MAX_SESSION_QUESTIONS) {
-    room.running = false
-    updateSessionTopFive()
-    addFeed('All 15 questions completed! Session ended.')
-    io.to(ROOM_ID).emit('state', serializeState())
-    return
-  }
-
-  room.currentQuestion = createQuestionRound(room.currentQuestion.id)
-  room.questionsAppeared += 1
-  room.touchedWords.clear()
-  retargetWordsForQuestion(room.currentQuestion, profile, progress)
-  ensureCorrectOptionWords(progress, profile)
-  room.spawnBudget = 1.2
-  room.nextQuestionAtMs = nowMs + QUESTION_DURATION_MS
-  if (reason === 'answered') {
-    addFeed('New question loaded after correct answer')
-  } else {
-    addFeed('Question rotated by control system')
-  }
-  addFeed(`Ops Notice: ${pick(OPS_NOTIFICATIONS)}`)
-}
-
 function triggerEvent(nowMs) {
   const event = pick(CHAOS_EVENTS)
   room.event = { id: event.id, name: event.name, endsAtMs: nowMs + event.durationMs }
@@ -865,9 +736,11 @@ function triggerEvent(nowMs) {
   addFeed(`Ops Notice: ${pick(OPS_NOTIFICATIONS)}`)
 
   if (event.id === 'signal-freeze') {
-    room.words.forEach((word) => {
-      word.frozen = Math.random() < 0.38
-    })
+    for (const player of room.players) {
+      if (player.gameRunning && player.words) {
+        player.words.forEach((word) => { word.frozen = Math.random() < 0.38 })
+      }
+    }
   }
 
   if (event.id === 'data-breach' && room.players.length > 1) {
@@ -886,35 +759,89 @@ function triggerEvent(nowMs) {
 
 function clearEvent() {
   if (room.event.id === 'signal-freeze') {
-    room.words.forEach((word) => {
-      word.frozen = false
-    })
+    for (const player of room.players) {
+      if (player.words) player.words.forEach((word) => { word.frozen = false })
+    }
   }
   room.event = { id: null, name: '', endsAtMs: 0 }
 }
 
-function serializeState() {
-  const requiredCorrect = requiredCorrectHits()
+// ---- Per-player helpers ----
+
+function startPlayerGame(player) {
+  player.gameRunning = true
+  player.startedAtMs = Date.now()
+  player.timeLeft = GAME_SECONDS
+  player.currentQuestion = createQuestionRound()
+  player.words = primeWordsForQuestion(player.currentQuestion, room.performanceMode, 0)
+  player.spawnBudget = 0
+  player.tappedWordIds = new Set()
+}
+
+function ensureCorrectWordsForPlayer(player, progress, profile) {
+  if (!player.words) return
+  let correctWords = player.words.filter((w) => w.isCorrect).length
+  while (correctWords < MIN_CORRECT_WORDS) {
+    const usedColors = new Set(player.words.filter((w) => w.isCorrect).map((w) => w.colorVariant))
+    const nextColor = randomColorVariant(usedColors)
+    if (player.words.length < profile.maxWords) {
+      player.words.push(createOptionWord(progress, profile, player.currentQuestion, player.currentQuestion.answer, nextColor))
+      correctWords += 1
+    } else {
+      const idx = player.words.findIndex((w) => !w.isCorrect)
+      if (idx === -1) break
+      player.words[idx] = createOptionWord(progress, profile, player.currentQuestion, player.currentQuestion.answer, nextColor)
+      correctWords += 1
+    }
+  }
+}
+
+function autoFinishPlayer(player) {
+  if (player.autoFinished) return
+  player.gameRunning = false
+  player.autoFinished = true
   updateSessionTopFive()
-  const sessionElapsed = Date.now() - room.sessionStartedAtMs
-  const sessionTimeLeft = Math.max(0, Math.floor((SESSION_DURATION_MS - sessionElapsed) / 1000))
+  room.sessionQuestionsCount += 1
+  addFeed(`${player.name} finished (${player.correctHits}/${player.correctHits + player.wrongHits} correct)`)
+  if (player.socketId) {
+    io.to(player.socketId).emit('player:auto-finish', {
+      score: player.score,
+      correctHits: player.correctHits,
+      qualifiesForGoodies: player.score >= GOODIES_BENCHMARK,
+    })
+  }
+}
+
+// ---- State serialization ----
+
+function serializeSharedPlayers() {
+  updateSessionTopFive()
+  return room.players.map(({ socketId, tappedWordIds, words, spawnBudget, startedAtMs, ...p }) => ({
+    ...p,
+    isOnline: Boolean(socketId),
+    isQualified: p.score >= GOODIES_BENCHMARK,
+    attempted: (p.correctHits || 0) + (p.wrongHits || 0) > 0,
+  }))
+}
+
+function sessionTimeLeftSeconds() {
+  const elapsed = Date.now() - room.sessionStartedAtMs
+  return Math.max(0, Math.floor((SESSION_DURATION_MS - elapsed) / 1000))
+}
+
+function serializeStateForPlayer(player) {
   return {
     roomId: room.id,
     sessionId: room.sessionId,
     performanceMode: room.performanceMode,
-    running: room.running,
-    timeLeft: room.timeLeft,
+    running: player.gameRunning || false,
+    timeLeft: player.timeLeft || 0,
     question: {
-      prompt: room.currentQuestion.prompt,
-      options: room.currentQuestion.options,
+      prompt: player.currentQuestion?.prompt || '',
+      options: player.currentQuestion?.options || [],
     },
-    words: room.words,
-    players: room.players.map(({ socketId, tappedWordIds, ...player }) => ({
-      ...player,
-      isOnline: Boolean(socketId),
-      isQualified: (player.correctHits || 0) >= requiredCorrect,
-      attempted: (player.correctHits || 0) + (player.wrongHits || 0) > 0,
-    })),
+    words: player.words || [],
+    players: serializeSharedPlayers(),
     feed: room.feed,
     event: room.event,
     world: { width: WORLD_WIDTH, height: WORLD_HEIGHT },
@@ -924,39 +851,70 @@ function serializeState() {
     goodiesBenchmark: GOODIES_BENCHMARK,
     sessionQuestionsTotal: MAX_SESSION_QUESTIONS,
     sessionQuestionsCount: room.sessionQuestionsCount,
-    sessionTimeLeft,
+    sessionTimeLeft: sessionTimeLeftSeconds(),
   }
 }
 
+function serializeHostState() {
+  return {
+    roomId: room.id,
+    sessionId: room.sessionId,
+    performanceMode: room.performanceMode,
+    running: room.running,
+    timeLeft: 0,
+    question: { prompt: '', options: [] },
+    words: [],
+    players: serializeSharedPlayers(),
+    feed: room.feed,
+    event: room.event,
+    world: { width: WORLD_WIDTH, height: WORLD_HEIGHT },
+    questionStats: room.questionStats,
+    sessionTopFive: room.sessionTopFive,
+    maxPlayers: MAX_PLAYERS,
+    goodiesBenchmark: GOODIES_BENCHMARK,
+    sessionQuestionsTotal: MAX_SESSION_QUESTIONS,
+    sessionQuestionsCount: room.sessionQuestionsCount,
+    sessionTimeLeft: sessionTimeLeftSeconds(),
+  }
+}
+
+function broadcastState() {
+  // Send personalized state to each connected player
+  for (const player of room.players) {
+    if (player.socketId) {
+      io.to(player.socketId).emit('state', serializeStateForPlayer(player))
+    }
+  }
+  // Send host state to all non-player sockets
+  if (hostSockets.size > 0) {
+    const hostState = serializeHostState()
+    for (const sid of hostSockets) {
+      io.to(sid).emit('state', hostState)
+    }
+  }
+}
+
+
 function resetGame() {
   room.sessionId = createSessionId()
-  room.startedAtMs = Date.now()
   room.running = true
-  room.timeLeft = GAME_SECONDS
-  room.currentQuestion = createQuestionRound()
-  room.words = primeWordsForQuestion(room.currentQuestion, room.performanceMode, 0)
-  room.feed = ['New round started']
+  room.feed = ['New session started']
   room.event = { id: null, name: '', endsAtMs: 0 }
   room.nextEventAtMs = Date.now() + 9000
-  room.nextQuestionAtMs = Date.now() + QUESTION_DURATION_MS
-  room.spawnBudget = 0
   room.lastTickMs = Date.now()
-  room.touchedWords.clear()
   room.questionStats = { correct: 0, wrong: 0 }
-  room.questionsAppeared = 1
-  room.sessionQuestionsCount = 0    // reset question counter for new round
+  room.sessionQuestionsCount = 0
   room.sessionTopFive = []
-  room.players.forEach((player) => {
+  // Restart each player's individual game
+  for (const player of room.players) {
     player.score = 0
     player.correctHits = 0
     player.wrongHits = 0
     player.surveySubmitted = false
     player.autoFinished = false
-    player.currentQuestion = createQuestionRound()
-    player.tappedWordIds = new Set()
-  })
-  // Immediately push full state so all clients see 1:30 right away
-  io.to(ROOM_ID).emit('state', serializeState())
+    startPlayerGame(player)
+  }
+  broadcastState()
 }
 
 function gameTick() {
@@ -965,76 +923,67 @@ function gameTick() {
   const dt = dtMs / 1000
   room.lastTickMs = nowMs
 
-  if (!room.running) {
-    return
-  }
+  if (!room.running) return
 
-  const elapsedMs = nowMs - room.startedAtMs
-  const progress = clamp(elapsedMs / (GAME_SECONDS * 1000), 0, 1)
-  const profile = activeProfile()
-  room.timeLeft = Math.max(0, GAME_SECONDS - Math.floor(elapsedMs / 1000))
-
-  if (room.timeLeft <= 0) {
-    room.running = false
-    updateSessionTopFive()
-    addFeed('Timer complete. Match ended.')
-    return
-  }
-
+  // Shared chaos events
   if (!room.event.id && nowMs >= room.nextEventAtMs) {
     triggerEvent(nowMs)
     room.nextEventAtMs = nowMs + rand(10000, 14500)
   }
-
   if (room.event.id && nowMs >= room.event.endsAtMs) {
     clearEvent()
   }
 
-  const spawnRate = profile.spawnBase + progress * profile.spawnRamp
-  room.spawnBudget += dt * spawnRate
+  const profile = activeProfile()
+  const eventId = room.event.id
 
-  while (room.spawnBudget >= 1 && room.words.length < profile.maxWords) {
-    room.words.push(createOptionWord(progress, profile, room.currentQuestion))
-    room.spawnBudget -= 1
+  // Per-player physics + timer
+  for (const player of room.players) {
+    if (!player.gameRunning || !player.socketId) continue
+
+    const elapsedMs = nowMs - player.startedAtMs
+    const progress = clamp(elapsedMs / (GAME_SECONDS * 1000), 0, 1)
+    player.timeLeft = Math.max(0, GAME_SECONDS - Math.floor(elapsedMs / 1000))
+
+    if (player.timeLeft <= 0) {
+      autoFinishPlayer(player)
+      continue
+    }
+
+    // Spawn words
+    player.spawnBudget = (player.spawnBudget || 0) + dt * (profile.spawnBase + progress * profile.spawnRamp)
+    while (player.spawnBudget >= 1 && player.words.length < profile.maxWords) {
+      player.words.push(createOptionWord(progress, profile, player.currentQuestion))
+      player.spawnBudget -= 1
+    }
+
+    // Physics
+    player.words = player.words
+      .map((word) => {
+        word.ageMs += dtMs
+        if (word.ageMs >= word.lifeMs) return null
+
+        const speedBoost = eventId === 'automation-surge' ? 1.68 : 1
+        const freezeFactor = word.frozen ? 0.08 : 1
+        const driftX = Math.sin((elapsedMs / 1000) * word.driftFreq + word.phase) * word.driftAmp
+        const driftY = Math.cos((elapsedMs / 1000) * word.driftFreq * 0.8 + word.phase) * word.driftAmp
+
+        word.x += (word.vx + driftX) * dt * speedBoost * freezeFactor
+        word.y += (word.vy + driftY) * dt * speedBoost * freezeFactor
+
+        if (word.x <= word.halfW + 40) { word.x = word.halfW + 40; word.vx = Math.abs(word.vx) }
+        if (word.x >= WORLD_WIDTH - word.halfW - 40) { word.x = WORLD_WIDTH - word.halfW - 40; word.vx = -Math.abs(word.vx) }
+        if (word.y <= word.halfH + 40) { word.y = word.halfH + 40; word.vy = Math.abs(word.vy) }
+        if (word.y >= WORLD_HEIGHT - word.halfH - 40) { word.y = WORLD_HEIGHT - word.halfH - 40; word.vy = -Math.abs(word.vy) }
+
+        return word
+      })
+      .filter(Boolean)
+
+    ensureCorrectWordsForPlayer(player, progress, profile)
   }
 
-  const eventId = room.event.id
-  room.words = room.words
-    .map((word) => {
-      word.ageMs += dtMs
-      if (word.ageMs >= word.lifeMs) return null
-
-      const speedBoost = eventId === 'automation-surge' ? 1.68 : 1
-      const freezeFactor = word.frozen ? 0.08 : 1
-      const driftX = Math.sin((elapsedMs / 1000) * word.driftFreq + word.phase) * word.driftAmp
-      const driftY =
-        Math.cos((elapsedMs / 1000) * word.driftFreq * 0.8 + word.phase) * word.driftAmp
-
-      word.x += (word.vx + driftX) * dt * speedBoost * freezeFactor
-      word.y += (word.vy + driftY) * dt * speedBoost * freezeFactor
-
-      if (word.x <= word.halfW + 40) {
-        word.x = word.halfW + 40
-        word.vx = Math.abs(word.vx)
-      }
-      if (word.x >= WORLD_WIDTH - word.halfW - 40) {
-        word.x = WORLD_WIDTH - word.halfW - 40
-        word.vx = -Math.abs(word.vx)
-      }
-      if (word.y <= word.halfH + 40) {
-        word.y = word.halfH + 40
-        word.vy = Math.abs(word.vy)
-      }
-      if (word.y >= WORLD_HEIGHT - word.halfH - 40) {
-        word.y = WORLD_HEIGHT - word.halfH - 40
-        word.vy = -Math.abs(word.vy)
-      }
-
-      return word
-    })
-    .filter(Boolean)
-
-  ensureCorrectOptionWords(progress, profile)
+  broadcastState()
 }
 
 function playerFromSocket(socketId) {
@@ -1065,7 +1014,14 @@ function findPlayerByIdentity(playerId, playerName, sessionId) {
 
 io.on('connection', (socket) => {
   socket.join(ROOM_ID)
-  socket.emit('state', serializeState())
+  hostSockets.add(socket.id)
+  socket.emit('state', serializeHostState())
+
+  socket.on('disconnect', () => {
+    hostSockets.delete(socket.id)
+    const player = playerFromSocket(socket.id)
+    if (player) player.socketId = null
+  })
 
   socket.on('host:reset', () => {
     resetGame()
@@ -1075,11 +1031,6 @@ io.on('connection', (socket) => {
     const nextMode = mode === 'standard' ? 'standard' : mode === 'smooth' ? 'smooth' : null
     if (!nextMode) return
     room.performanceMode = nextMode
-    room.spawnBudget = 0
-    const profile = activeProfile()
-    if (room.words.length > profile.maxWords) {
-      room.words = room.words.slice(0, profile.maxWords)
-    }
     addFeed(`Performance mode switched to ${nextMode}`)
   })
 
@@ -1107,40 +1058,35 @@ io.on('connection', (socket) => {
     if (existing) {
       existing.socketId = socket.id
       existing.sessionId = cleanedSessionId
-      // Reset their score so a refresh can't preserve previous answers
+      hostSockets.delete(socket.id)
+      // Reset score so page refresh can't preserve it
       existing.score = 0
       existing.correctHits = 0
       existing.wrongHits = 0
       existing.surveySubmitted = false
       existing.autoFinished = false
-      existing.currentQuestion = createQuestionRound()
-      existing.tappedWordIds = new Set()
-      if (!room.running) {
-        resetGame()
-        addFeed(`${existing.name} rejoined — new round started`)
-      }
+      startPlayerGame(existing)
       socket.emit('player:joined', {
         playerId: existing.id,
         name: existing.name,
         sessionId: existing.sessionId,
       })
       addFeed(`${existing.name} reconnected`)
+      io.to(existing.socketId).emit('state', serializeStateForPlayer(existing))
       return
     }
 
     if (!room.running) {
-      resetGame()
-      addFeed('New round started for incoming player')
-    } else {
-      // Always reset to full 2:00 when a new player joins so everyone starts fresh
-      resetGame()
-      addFeed(`${cleaned} joined — timer reset to ${GAME_SECONDS}s`)
+      socket.emit('player:join:error', { message: 'No active session right now.' })
+      return
     }
 
     if (room.players.length >= MAX_PLAYERS) {
       socket.emit('player:join:error', { message: 'Room is full (20 players max).' })
       return
     }
+
+    hostSockets.delete(socket.id)
 
     const player = {
       id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1152,38 +1098,42 @@ io.on('connection', (socket) => {
       wrongHits: 0,
       surveySubmitted: false,
       autoFinished: false,
+      gameRunning: false,
       color: PLAYER_COLORS[room.players.length % PLAYER_COLORS.length],
-      currentQuestion: createQuestionRound(),
+      currentQuestion: null,
+      words: [],
+      spawnBudget: 0,
       tappedWordIds: new Set(),
+      timeLeft: GAME_SECONDS,
+      startedAtMs: Date.now(),
     }
 
+    startPlayerGame(player)
     room.players.push(player)
+    addFeed(`${player.name} joined`)
+
     socket.emit('player:joined', {
       playerId: player.id,
       name: player.name,
       sessionId: player.sessionId,
     })
-    addFeed(`${player.name} joined the round`)
+    io.to(player.socketId).emit('state', serializeStateForPlayer(player))
   })
 
   socket.on('word:tap', ({ wordId }) => {
-    if (!room.running) return
     if (!wordId) return
 
     const player = playerFromSocket(socket.id)
-    if (!player) return
-    if (player.autoFinished) return
+    if (!player || !player.gameRunning || player.autoFinished) return
 
-    // Per-player dedup: ignore if this player already tapped this word
     if (!player.tappedWordIds) player.tappedWordIds = new Set()
     if (player.tappedWordIds.has(wordId)) return
 
-    const word = room.words.find((w) => w.id === wordId)
+    const word = (player.words || []).find((w) => w.id === wordId)
     if (!word) return
 
     player.tappedWordIds.add(wordId)
 
-    // Per-player correctness: check against THIS player's own question
     const isCorrect = word.text === player.currentQuestion?.answer
     const delta = isCorrect ? 5 : 0
     player.score = Math.max(0, player.score + delta)
@@ -1198,23 +1148,32 @@ io.on('connection', (socket) => {
       addFeed(`${player.name}: Wrong +0`)
     }
 
-    // Rotate THIS player's question individually
+    // Rotate this player's question and retarget their floating words
     player.currentQuestion = createQuestionRound(player.currentQuestion?.id)
-    player.tappedWordIds = new Set()  // fresh slate for new question
+    player.tappedWordIds = new Set()
+    const nowMs = Date.now()
+    const progress = clamp((nowMs - player.startedAtMs) / (GAME_SECONDS * 1000), 0, 1)
+    const profile = activeProfile()
+    const decoyPool = shuffle(player.currentQuestion.options.filter((o) => o !== player.currentQuestion.answer))
+    let decoyIdx = 0
+    player.words = player.words.map((w, i) => {
+      const makeCorrect = i < MIN_CORRECT_WORDS
+      const text = makeCorrect ? player.currentQuestion.answer : (decoyPool[decoyIdx++ % decoyPool.length] || w.text)
+      const size = makeCorrect
+        ? rand(profile.size.correct[0], profile.size.correct[1])
+        : rand(profile.size.wrong[0], profile.size.wrong[1])
+      return { ...w, text, type: makeCorrect ? 'target' : 'decoy', tier: makeCorrect ? 'high' : 'mid', isCorrect: makeCorrect, size, halfW: Math.max(52, text.length * size * 0.27), halfH: Math.max(18, size * 0.74), ageMs: 0 }
+    })
 
-    // Auto-finish when player has answered MAX_SESSION_QUESTIONS total (right or wrong)
+    // Auto-finish when player has answered 15 total (right or wrong)
     const totalAnswered = player.correctHits + player.wrongHits
     if (totalAnswered >= MAX_SESSION_QUESTIONS) {
-      player.autoFinished = true
-      socket.emit('player:auto-finish', {
-        score: player.score,
-        correctHits: player.correctHits,
-        qualifiesForGoodies: player.score >= GOODIES_BENCHMARK,
-      })
-      addFeed(`${player.name} completed all ${MAX_SESSION_QUESTIONS} questions!`)
+      autoFinishPlayer(player)
     }
 
-    io.to(ROOM_ID).emit('state', serializeState())
+    // Send updated state to this player only, then refresh leaderboard for all
+    if (player.socketId) io.to(player.socketId).emit('state', serializeStateForPlayer(player))
+    broadcastState()
   })
 
   socket.on('player:survey-submitted', async (payload = {}, callback) => {
@@ -1375,7 +1334,7 @@ io.on('connection', (socket) => {
 
     player.surveySubmitted = true
     addFeed(`${player.name} submitted survey feedback`)
-    io.to(ROOM_ID).emit('state', serializeState())
+    broadcastState()
     ack({ ok: true })
   })
 
@@ -1390,7 +1349,6 @@ io.on('connection', (socket) => {
 
 setInterval(() => {
   gameTick()
-  io.to(ROOM_ID).emit('state', serializeState())
 }, 50)
 
 app.get('/health', (_req, res) => {
