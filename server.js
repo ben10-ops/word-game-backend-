@@ -18,7 +18,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL
 const ROOM_ID = 'main'
 const GAME_SECONDS = 90
 const MAX_SESSION_QUESTIONS = 15
-const GOODIES_BENCHMARK = 50
+const GOODIES_BENCHMARK = 60
 const SESSION_DURATION_MS = 20 * 60 * 1000   // 20 minutes per event session
 const QUESTION_DURATION_MS = 7000
 const WORLD_WIDTH = 1200
@@ -589,8 +589,8 @@ function shuffle(items) {
   return arr
 }
 
-function createQuestionRound(previousId = null) {
-  const candidates = QUIZ_ITEMS.filter((item) => item.prompt !== previousId)
+function createQuestionRound(usedIds = []) {
+  const candidates = QUIZ_ITEMS.filter((item) => !usedIds.includes(item.prompt))
   const base = pick(candidates.length > 0 ? candidates : QUIZ_ITEMS)
   // Always show ALL real app names as options so players learn all of them
   return {
@@ -759,7 +759,9 @@ function startPlayerGame(player) {
   player.gameRunning = true
   player.startedAtMs = Date.now()
   player.timeLeft = GAME_SECONDS
-  player.currentQuestion = createQuestionRound()
+  player.usedQuestionIds = []
+  player.currentQuestion = createQuestionRound([])
+  player.usedQuestionIds.push(player.currentQuestion.id)
   player.words = primeWordsForQuestion(player.currentQuestion, room.performanceMode, 0)
   player.spawnBudget = 0
   player.tappedWordIds = new Set()
@@ -803,7 +805,7 @@ function autoFinishPlayer(player) {
 
 function serializeSharedPlayers() {
   updateSessionTopFive()
-  return room.players.map(({ socketId, tappedWordIds, words, spawnBudget, startedAtMs, ...p }) => ({
+  return room.players.map(({ socketId, tappedWordIds, words, spawnBudget, startedAtMs, usedQuestionIds, ...p }) => ({
     ...p,
     isOnline: Boolean(socketId),
     isQualified: p.score >= GOODIES_BENCHMARK,
@@ -1136,7 +1138,9 @@ io.on('connection', (socket) => {
     }
 
     // Rotate this player's question and retarget their floating words
-    player.currentQuestion = createQuestionRound(player.currentQuestion?.id)
+    if (!player.usedQuestionIds) player.usedQuestionIds = []
+    player.currentQuestion = createQuestionRound(player.usedQuestionIds)
+    player.usedQuestionIds.push(player.currentQuestion.id)
     player.tappedWordIds = new Set()
     const nowMs = Date.now()
     const progress = clamp((nowMs - player.startedAtMs) / (GAME_SECONDS * 1000), 0, 1)
