@@ -24,7 +24,7 @@ const MAX_PLAYERS = 20
 
 const PERFORMANCE_PROFILES = {
   standard: {
-    maxWords: 34,
+    maxWords: 12,
     spawnBase: 2.2,
     spawnRamp: 4.1,
     size: { correct: [24, 36], wrong: [19, 30] },
@@ -33,7 +33,7 @@ const PERFORMANCE_PROFILES = {
     drift: { min: 8, max: 24 },
   },
   smooth: {
-    maxWords: 26,
+    maxWords: 12,
     spawnBase: 1.8,
     spawnRamp: 3.2,
     size: { correct: [23, 34], wrong: [18, 28] },
@@ -259,24 +259,26 @@ const randInt = (min, max) => Math.floor(rand(min, max + 1))
 
 const ANSWER_POOL = [...new Set(QUIZ_ITEMS.map((item) => item.answer))]
 const TECH_DISTRACTORS = [
-  'Microservice',
-  'Webhook',
-  'ZeroTrust',
-  'Telemetry',
-  'Observability',
-  'Kubernetes',
-  'Datapipeline',
-  'Tokenization',
-  'GraphQL',
-  'EdgeCache',
-  'LoadBalancer',
-  'Sandbox',
-  'FeatureFlag',
-  'Container',
-  'Serverless',
-  'Encryption',
-  'Throughput',
-  'Scalability',
+  'OnePortal',
+  'MyDevices',
+  'InnovateLab',
+  'OnboardPro',
+  'IdeaHub',
+  'CareerMap',
+  'GuestTrack',
+  'ContractHub',
+  'DeliveryDash',
+  'PulseCheck',
+  'CompassPro',
+  'AssetTrack',
+  'VisitorHub',
+  'LeaderView',
+  'WorkTrack',
+  'GovernX',
+  'IdeaForge',
+  'TeamPath',
+  'DeviceHub',
+  'VisitEase',
 ]
 const OPTION_POOL = [...new Set([...ANSWER_POOL, ...TECH_DISTRACTORS])]
 const QUESTION_OPTION_COUNT = 8
@@ -587,16 +589,12 @@ function shuffle(items) {
 function createQuestionRound(previousId = null) {
   const candidates = QUIZ_ITEMS.filter((item) => item.prompt !== previousId)
   const base = pick(candidates.length > 0 ? candidates : QUIZ_ITEMS)
-  const distractorCount = Math.max(1, Math.min(QUESTION_OPTION_COUNT - 1, OPTION_POOL.length - 1))
-  const distractors = sampleN(
-    OPTION_POOL.filter((answer) => answer !== base.answer),
-    distractorCount,
-  )
+  // Always show ALL real app names as options so players learn all of them
   return {
     id: base.prompt,
     prompt: base.prompt,
     answer: base.answer,
-    options: shuffle([base.answer, ...distractors]),
+    options: shuffle([...ANSWER_POOL]),
   }
 }
 
@@ -687,8 +685,8 @@ function createOptionWord(progress, profile, question, forcedText = null, forced
 
   const halfW = Math.max(52, text.length * size * 0.27)
   const halfH = Math.max(18, size * 0.74)
-  const x = rand(halfW + 24, WORLD_WIDTH - halfW - 24)
-  const y = rand(halfH + 24, WORLD_HEIGHT - halfH - 24)
+  const x = rand(halfW + 64, WORLD_WIDTH - halfW - 64)
+  const y = rand(halfH + 64, WORLD_HEIGHT - halfH - 64)
   const angle = rand(0, Math.PI * 2)
   const speed = rand(profile.speed.min, profile.speed.max) * (1 + progress * profile.speed.progressMult)
 
@@ -717,23 +715,20 @@ function createOptionWord(progress, profile, question, forcedText = null, forced
 
 function primeWordsForQuestion(question, mode = 'smooth', progress = 0) {
   const profile = PERFORMANCE_PROFILES[mode] || PERFORMANCE_PROFILES.smooth
-  const initialCount = Math.min(profile.maxWords, mode === 'smooth' ? 14 : 18)
-  const firstCorrectColor = randomColorVariant()
-  const secondCorrectColor = randomColorVariant(new Set([firstCorrectColor]))
-  const words = [
-    createOptionWord(progress, profile, question, question.answer, firstCorrectColor),
-    createOptionWord(progress, profile, question, question.answer, secondCorrectColor),
-  ]
-  const decoyPool = shuffle(question.options.filter((option) => option !== question.answer))
-  let decoyIndex = 0
+  const correctColor = randomColorVariant()
 
-  while (words.length < initialCount) {
-    const nextDecoy = decoyPool.length > 0 ? decoyPool[decoyIndex % decoyPool.length] : null
-    words.push(createOptionWord(progress, profile, question, nextDecoy))
-    decoyIndex += 1
-  }
+  // One word per real app name (9 total), no duplicates
+  const appWords = shuffle([...ANSWER_POOL]).map((option) => {
+    const isCorrect = option === question.answer
+    return createOptionWord(progress, profile, question, option, isCorrect ? correctColor : null)
+  })
 
-  return words
+  // Pick 4 random confusion words (not real app names)
+  const confusionWords = sampleN(TECH_DISTRACTORS, 4).map((option) =>
+    createOptionWord(progress, profile, question, option, null)
+  )
+
+  return shuffle([...appWords, ...confusionWords])
 }
 
 function retargetWordsForQuestion(question, profile, progress) {
@@ -933,6 +928,8 @@ function resetGame() {
     wrongHits: 0,
     surveySubmitted: false,
   }))
+  // Immediately push full state so all clients see 2:00 right away
+  io.to(ROOM_ID).emit('state', serializeState())
 }
 
 function gameTick() {
@@ -989,20 +986,20 @@ function gameTick() {
       word.x += (word.vx + driftX) * dt * speedBoost * freezeFactor
       word.y += (word.vy + driftY) * dt * speedBoost * freezeFactor
 
-      if (word.x <= word.halfW) {
-        word.x = word.halfW
+      if (word.x <= word.halfW + 40) {
+        word.x = word.halfW + 40
         word.vx = Math.abs(word.vx)
       }
-      if (word.x >= WORLD_WIDTH - word.halfW) {
-        word.x = WORLD_WIDTH - word.halfW
+      if (word.x >= WORLD_WIDTH - word.halfW - 40) {
+        word.x = WORLD_WIDTH - word.halfW - 40
         word.vx = -Math.abs(word.vx)
       }
-      if (word.y <= word.halfH) {
-        word.y = word.halfH
+      if (word.y <= word.halfH + 40) {
+        word.y = word.halfH + 40
         word.vy = Math.abs(word.vy)
       }
-      if (word.y >= WORLD_HEIGHT - word.halfH) {
-        word.y = WORLD_HEIGHT - word.halfH
+      if (word.y >= WORLD_HEIGHT - word.halfH - 40) {
+        word.y = WORLD_HEIGHT - word.halfH - 40
         word.vy = -Math.abs(word.vy)
       }
 
