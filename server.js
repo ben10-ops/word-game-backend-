@@ -17,8 +17,8 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL
   .filter(Boolean)
 const ROOM_ID = 'main'
 const GAME_SECONDS = 90
-const MAX_SESSION_QUESTIONS = 15
-const GOODIES_BENCHMARK = 60
+const MAX_SESSION_QUESTIONS = 10
+const GOODIES_BENCHMARK = 45
 const SESSION_DURATION_MS = 20 * 60 * 1000   // 20 minutes per event session
 const QUESTION_DURATION_MS = 7000
 const WORLD_WIDTH = 1200
