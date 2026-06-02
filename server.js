@@ -328,6 +328,14 @@ function quoteIdentifier(identifier) {
   return `"${String(identifier).replace(/"/g, '""')}"`
 }
 
+function getMumbaiTimestamp() {
+  const now = new Date()
+  // IST (Asia/Kolkata) is UTC+5:30
+  const mumbaiTime = new Date(now.getTime() + 5.5 * 60 * 60 * 1000)
+  // Return ISO format with IST timezone
+  return mumbaiTime.toISOString().replace('Z', '+05:30')
+}
+
 async function ensureLegacyFeedbackColumnDefaults() {
   if (!dbPool) return
 
@@ -1256,14 +1264,14 @@ io.on('connection', (socket) => {
             attempted,
             updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
           ON CONFLICT (room_id, session_id, player_name)
           DO UPDATE SET
             score = EXCLUDED.score,
             correct_hits = EXCLUDED.correct_hits,
             wrong_hits = EXCLUDED.wrong_hits,
             attempted = EXCLUDED.attempted,
-            updated_at = NOW()
+            updated_at = $8
           RETURNING id
         `,
         [
@@ -1274,6 +1282,7 @@ io.on('connection', (socket) => {
           player.correctHits,
           player.wrongHits,
           player.correctHits + player.wrongHits > 0,
+          getMumbaiTimestamp(),
         ],
       )
 
@@ -1299,7 +1308,7 @@ io.on('connection', (socket) => {
             submitted_at
           )
           VALUES (
-            $1, $2, $3, $4, $5::text[], $6::text[], $7, $8::text[], $9, $10, NOW()
+            $1, $2, $3, $4, $5::text[], $6::text[], $7, $8::text[], $9, $10, $11
           )
         `,
         [
