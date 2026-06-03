@@ -19,7 +19,7 @@ const ROOM_ID = 'main'
 const GAME_SECONDS = 90
 const MAX_SESSION_QUESTIONS = 10
 const GOODIES_BENCHMARK = 45
-const SESSION_DURATION_MS = 40 * 60 * 1000   // 20 minutes per event session
+const SESSION_DURATION_MS = 20 * 60 * 1000   // 20 minutes per event session
 const QUESTION_DURATION_MS = 7000
 const WORLD_WIDTH = 1200
 const WORLD_HEIGHT = 760
@@ -892,8 +892,9 @@ function broadcastState() {
 }
 
 
-function resetGame() {
+function resetGame(reason = 'admin') {
   room.sessionId = createSessionId()
+  room.sessionStartedAtMs = Date.now()
   room.running = true
   room.feed = ['New session started']
   room.event = { id: null, name: '', endsAtMs: 0 }
@@ -902,15 +903,12 @@ function resetGame() {
   room.questionStats = { correct: 0, wrong: 0 }
   room.sessionQuestionsCount = 0
   room.sessionTopFive = []
-  // Restart each player's individual game
-  for (const player of room.players) {
-    player.score = 0
-    player.correctHits = 0
-    player.wrongHits = 0
-    player.surveySubmitted = false
-    player.autoFinished = false
-    startPlayerGame(player)
-  }
+  // Wipe all players so the next batch can play
+  room.players = []
+
+  // Tell all clients to show the transition screen and reload
+  io.emit('session:reset', { reason })
+
   broadcastState()
 }
 
@@ -921,6 +919,11 @@ function gameTick() {
   room.lastTickMs = nowMs
 
   if (!room.running) return
+
+  if (nowMs - room.sessionStartedAtMs >= SESSION_DURATION_MS) {
+    resetGame('timeout')
+    return
+  }
 
   // Shared chaos events
   if (!room.event.id && nowMs >= room.nextEventAtMs) {
